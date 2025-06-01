@@ -4,19 +4,67 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 )
 
 const DNS_PORT = 8053
 const MESSAGE_SIZE = 512
 const MIN_MESSAGE_SIZE = 12
 
+// DNSHeader represents the header of a DNS message
 type DNSHeader struct {
-	ID uint16
+	ID      uint16 // Identifier for the DNS message
+	Flags   uint16 // Flags for the DNS message
+	QDCount uint16 // Number of questions
+	ANCount uint16 // Number of answers
+	NSCount uint16 // Number of authority records
+	ARCount uint16 // Number of additional records
 }
 
-type DNSMessage struct {
-	Header DNSHeader
+// DNSQuestion represents a single DNS question
+type DNSQuestion struct {
+	Name  string // Domain name in the question
+	Type  uint16 // Type of the query (A, AAAA, etc.)
+	Class uint16 // Class of the query (IN, CH, HS, etc.)
 }
+
+// DNSResourceRecord represents a single DNS resource record
+type DNSResourceRecord struct {
+	Name  string // Domain name of the resource record
+	Type  uint16 // Type of the resource record (A, AAAA, etc.)
+	Class uint16 // Class of the resource record (IN, CH, HS, etc.)
+	TTL   uint32 // Time to live for the resource record
+	Data  []byte // Data of the resource record (IP address, etc.)
+}
+
+// DNSMessage represents a complete DNS message
+type DNSMessage struct {
+	Header    DNSHeader           // Header of the DNS message
+	Questions []DNSQuestion       // List of questions in the DNS message
+	Answers   []DNSResourceRecord // List of answers in the DNS message
+}
+
+// DNS Record Types
+const (
+	TYPE_A     = 1
+	TYPE_NS    = 2
+	TYPE_CNAME = 5
+	TYPE_AAAA  = 28
+	CLASS_IN   = 1
+)
+
+// Simple in memory DNS server that listens for DNS queries on UDP port 8053
+// var dnsRecords = map[string]map[uint16][]byte{
+// 	"example.com": {
+// 		TYPE_A: []byte{192, 168, 1, 1}, // 192.168.1.1
+// 	},
+// 	"test.com": {
+// 		TYPE_A: []byte{10, 0, 0, 1}, // 10.0.0.1
+// 	},
+// 	"localhost": {
+// 		TYPE_A: []byte{127, 0, 0, 1}, // 127.0.0.1
+// 	},
+// }
 
 func main() {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", DNS_PORT))
@@ -48,7 +96,7 @@ func handleDNSQuery(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
 	fmt.Printf("Received DNS query from %s: %x\n", clientAddr, data)
 
 	if len(data) < MIN_MESSAGE_SIZE {
-		log.Println()
+		log.Println("Received DNS message too short")
 		return
 	}
 
@@ -62,11 +110,98 @@ func handleDNSQuery(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
 }
 
 func parseDNSMessage(data []byte) (*DNSMessage, error) {
-	if len(data) < MIN_MESSAGE_SIZE {
-		return nil, fmt.Errorf("message too short")
-	}
-
 	msg := &DNSMessage{}
 
+	msg.Header.ID = uint16(data[0])<<8 | uint16(data[1])
+	msg.Header.Flags = uint16(data[2])<<8 | uint16(data[3])
+	msg.Header.QDCount = uint16(data[4])<<8 | uint16(data[5])
+	msg.Header.ANCount = uint16(data[6])<<8 | uint16(data[7])
+	msg.Header.NSCount = uint16(data[8])<<8 | uint16(data[9])
+	msg.Header.ARCount = uint16(data[10])<<8 | uint16(data[11])
+
+	fmt.Printf("DNS Header: ID=%d, Flags=%d, QDCount=%d, ANCount=%d, NSCount=%d, ARCount=%d\n",
+		msg.Header.ID, msg.Header.Flags, msg.Header.QDCount,
+		msg.Header.ANCount, msg.Header.NSCount, msg.Header.ARCount)
+
+	offset := 12
+	for range int(msg.Header.QDCount) {
+		question, newOffset, err := parseQuestions(data, offset)
+		if err != nil {
+			return nil, err
+		}
+		msg.Questions = append(msg.Questions, question)
+		offset = newOffset
+	}
+
 	return msg, nil
+}
+
+func parseQuestions(data []byte, offset int) (DNSQuestion, int, error) {
+	question := DNSQuestion{}
+
+	name, newOffset, err := parseDomainName(data, offset)
+	if err != nil {
+		return question, 0, err
+	}
+	question.Name = name
+
+	log.Printf("Parsed question name: %s", question.Name)
+
+	if newOffset+4 > len(data) {
+		return question, 0, fmt.Errorf("not enough data for question type and class")
+	}
+
+	question.Type = uint16(data[newOffset])<<8 | uint16(data[newOffset+1])
+	question.Class = uint16(data[newOffset+2])<<8 | uint16(data[newOffset+3])
+
+	return question, newOffset + 4, nil
+}
+
+func parseDomainName(data []byte, offset int) (string, int, error) {
+	var labels []string
+
+	for {
+		if offset >= len(data) {
+			return "", 0, fmt.Errorf("unexpected end of data")
+		}
+
+		length := data[offset]
+
+		// check for end of labels
+		if length == 0 {
+			offset++
+			break
+		}
+
+		// check for compression pointer
+		// 0xC0 = 11000000
+		if length&0xC0 == 0xC0 {
+			if offset+1 >= len(data) {
+				return "", 0, fmt.Errorf("invalid compression pointer")
+			}
+			// 0x3F = 00111111
+			pointer := int(uint16(length&0x3F)<<8 | uint16(data[offset+1]))
+			name, _, err := parseDomainName(data, pointer)
+			if err != nil {
+				return "", 0, err
+			}
+			labels = append(labels, strings.Split(name, ".")...)
+			offset += 2
+			break
+		}
+
+		if offset+int(length)+1 > len(data) {
+			return "", 0, fmt.Errorf("label extends beyond data")
+		}
+
+		label := string(data[offset+1 : offset+1+int(length)])
+		labels = append(labels, label)
+		offset += int(length) + 1
+	}
+
+	if len(labels) == 0 {
+		return ".", offset, nil
+	}
+
+	return strings.Join(labels, "."), offset, nil
 }
