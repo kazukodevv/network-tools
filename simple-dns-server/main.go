@@ -145,7 +145,7 @@ func parseQuestions(data []byte, offset int) (DNSQuestion, int, error) {
 	}
 	question.Name = name
 
-	fmt.Println("Parsed question name:", question.Name)
+	log.Printf("Parsed question name: %s", question.Name)
 
 	if newOffset+4 > len(data) {
 		return question, 0, fmt.Errorf("not enough data for question type and class")
