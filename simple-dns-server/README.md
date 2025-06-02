@@ -198,5 +198,5 @@ cat log.json | jq 'select(.msg | contains("DNS record found"))'
 cat log.json | jq 'select(.msg | contains("Query handled"))'
 
 cat log.json | jq 'select(.domain == "www.example.com")'
-cat log.json | jq 'select(.question_name == "www.example.com")'v
+cat log.json | jq 'select(.question_name == "www.example.com")'
 ```
