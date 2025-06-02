@@ -370,7 +370,7 @@ func encodeDomainName(name string) []byte {
 	labels := strings.Split(name, ".")
 	for _, label := range labels {
 		if len(label) > 63 {
-			log.Printf("Label too long: %s", label)
+			slog.Warn("Label too long", "label", label)
 			continue
 		}
 		buffer = append(buffer, byte(len(label)))
