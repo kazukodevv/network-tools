@@ -187,3 +187,16 @@ Enable verbose logging by examining the console output when running the server. 
 - Parsed DNS headers
 - Domain names extracted from queries
 - Any parsing errors
+
+## Logger
+
+```sh
+cat log.json | jq 'select(.level == "ERROR")'
+cat log.json | jq 'select(.level == "INFO")'
+
+cat log.json | jq 'select(.msg | contains("DNS record found"))'
+cat log.json | jq 'select(.msg | contains("Query handled"))'
+
+cat log.json | jq 'select(.domain == "www.example.com")'
+cat log.json | jq 'select(.question_name == "www.example.com")'v
+```

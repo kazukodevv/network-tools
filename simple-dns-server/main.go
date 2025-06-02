@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -72,25 +74,46 @@ var dnsRecords = map[string]map[uint16][]byte{
 	},
 }
 
+var logger *slog.Logger
+
+func init() {
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level:     slog.LevelDebug,
+		AddSource: true,
+	})
+	logger = slog.New(handler)
+	slog.SetDefault(logger)
+}
+
 func main() {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", DNS_PORT))
 	if err != nil {
-		log.Fatal("Error resolving UDP address:", err)
+		logger.Error("Failed to resolve UDP address",
+			"error", err,
+			"port", DNS_PORT)
+		os.Exit(1)
 	}
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Fatal("Error listening on UDP:", err)
+		logger.Error("Failed to listen on UDP",
+			"error", err,
+			"address", addr.String())
+		os.Exit(1)
 	}
 	defer conn.Close()
 
-	fmt.Printf("DNS Server started on port %d\n", DNS_PORT)
+	logger.Info("DNS Server started",
+		"port", DNS_PORT,
+		"message_size", MESSAGE_SIZE)
 
 	for {
 		buffer := make([]byte, MESSAGE_SIZE)
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
-			log.Printf("Error reading from UDP: %v", err)
+			logger.Error("Error reading from UDP",
+				"error", err,
+				"client_addr", clientAddr)
 			continue
 		}
 
@@ -99,31 +122,54 @@ func main() {
 }
 
 func handleDNSQuery(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
-	log.Printf("Received DNS query from %s: %x\n", clientAddr, data)
+	queryLogger := logger.With(
+		"client_addr", clientAddr.String(),
+		"query_size", len(data))
+
+	queryLogger.Debug("Received DNS query",
+		"data_hex", fmt.Sprintf("%x", data))
 
 	if len(data) < MIN_MESSAGE_SIZE {
-		log.Println("Received DNS message too short")
+		queryLogger.Warn("DNS message too short",
+			"min_size", MIN_MESSAGE_SIZE)
 		return
 	}
 
 	msg, err := parseDNSMessage(data)
 	if err != nil {
-		log.Printf("Error parsing DNS message: %v", err)
+		queryLogger.Error("Failed to parse DNS message", "error", err)
 		return
 	}
 
-	fmt.Println("Parsed DNS message:", msg)
+	queryLogger.Info("Parsed DNS message",
+		"message_id", msg.Header.ID,
+		"flags", msg.Header.Flags,
+		"question_count", msg.Header.QDCount,
+		"question_name", func() string {
+			if len(msg.Questions) > 0 {
+				return msg.Questions[0].Name
+			}
+			return ""
+		}())
 
 	response := createDNSResponse(msg)
 
 	responseBytes := encodeDNSMessage(response)
 	_, err = conn.WriteToUDP(responseBytes, clientAddr)
 	if err != nil {
-		log.Printf("Error sending DNS response to %s: %v", clientAddr, err)
+		queryLogger.Error("Failed to send DNS response", "error", err)
+		return
 	}
 
-	fmt.Printf("Handled query for: %s from %s\n",
-		msg.Questions[0].Name, clientAddr.String())
+	queryLogger.Info("Query handled successfully",
+		"domain", func() string {
+			if len(msg.Questions) > 0 {
+				return msg.Questions[0].Name
+			}
+			return ""
+		}(),
+		"response_size", len(responseBytes),
+		"answer_count", response.Header.ANCount)
 }
 
 func parseDNSMessage(data []byte) (*DNSMessage, error) {
@@ -166,7 +212,7 @@ func parseQuestions(data []byte, offset int) (DNSQuestion, int, error) {
 	}
 	question.Name = name
 
-	fmt.Println("Parsed question name:", question.Name)
+	logger.Debug("Parsed question name", "name", question.Name)
 
 	if newOffset+4 > len(data) {
 		return question, 0, fmt.Errorf("not enough data for question type and class")
@@ -174,6 +220,11 @@ func parseQuestions(data []byte, offset int) (DNSQuestion, int, error) {
 
 	question.Type = uint16(data[newOffset])<<8 | uint16(data[newOffset+1])
 	question.Class = uint16(data[newOffset+2])<<8 | uint16(data[newOffset+3])
+
+	logger.Debug("Parsed question details",
+		"name", question.Name,
+		"type", question.Type,
+		"class", question.Class)
 
 	return question, newOffset + 4, nil
 }
@@ -240,7 +291,14 @@ func createDNSResponse(query *DNSMessage) *DNSMessage {
 		Questions: query.Questions,
 	}
 
+	responseLogger := logger.With("query_id", query.Header.ID)
+
 	for _, question := range query.Questions {
+		questionLogger := responseLogger.With(
+			"domain", question.Name,
+			"type", question.Type,
+			"class", question.Class)
+
 		if question.Type == TYPE_A && question.Class == CLASS_IN {
 			domainName := strings.ToLower(question.Name)
 			if records, exists := dnsRecords[domainName]; exists {
@@ -254,6 +312,10 @@ func createDNSResponse(query *DNSMessage) *DNSMessage {
 					}
 					response.Answers = append(response.Answers, answer)
 					response.Header.ANCount++
+
+					questionLogger.Info("DNS record found",
+						"ip", fmt.Sprintf("%d.%d.%d.%d", ipData[0], ipData[1], ipData[2], ipData[3]),
+						"ttl", answer.TTL)
 				}
 			}
 		}
