@@ -54,17 +54,23 @@ const (
 )
 
 // Simple in memory DNS server that listens for DNS queries on UDP port 8053
-// var dnsRecords = map[string]map[uint16][]byte{
-// 	"example.com": {
-// 		TYPE_A: []byte{192, 168, 1, 1}, // 192.168.1.1
-// 	},
-// 	"test.com": {
-// 		TYPE_A: []byte{10, 0, 0, 1}, // 10.0.0.1
-// 	},
-// 	"localhost": {
-// 		TYPE_A: []byte{127, 0, 0, 1}, // 127.0.0.1
-// 	},
-// }
+var dnsRecords = map[string]map[uint16][]byte{
+	"www.example.com": {
+		TYPE_A: []byte{192, 168, 1, 1}, // 192.168.1.1
+	},
+	"example.com": {
+		TYPE_A: []byte{192, 168, 1, 1}, // 192.168.1.1
+	},
+	"test.com": {
+		TYPE_A: []byte{10, 0, 0, 1}, // 10.0.0.1
+	},
+	"localhost": {
+		TYPE_A: []byte{127, 0, 0, 1}, // 127.0.0.1
+	},
+	"google.com": {
+		TYPE_A: []byte{8, 8, 8, 8}, // 8.8.8.8 (example)
+	},
+}
 
 func main() {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", DNS_PORT))
@@ -93,7 +99,7 @@ func main() {
 }
 
 func handleDNSQuery(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
-	fmt.Printf("Received DNS query from %s: %x\n", clientAddr, data)
+	log.Printf("Received DNS query from %s: %x\n", clientAddr, data)
 
 	if len(data) < MIN_MESSAGE_SIZE {
 		log.Println("Received DNS message too short")
@@ -107,9 +113,24 @@ func handleDNSQuery(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
 	}
 
 	fmt.Println("Parsed DNS message:", msg)
+
+	response := createDNSResponse(msg)
+
+	responseBytes := encodeDNSMessage(response)
+	_, err = conn.WriteToUDP(responseBytes, clientAddr)
+	if err != nil {
+		log.Printf("Error sending DNS response to %s: %v", clientAddr, err)
+	}
+
+	fmt.Printf("Handled query for: %s from %s\n",
+		msg.Questions[0].Name, clientAddr.String())
 }
 
 func parseDNSMessage(data []byte) (*DNSMessage, error) {
+	if len(data) < MIN_MESSAGE_SIZE {
+		return nil, fmt.Errorf("message too short: %d bytes, minimum %d required", len(data), MIN_MESSAGE_SIZE)
+	}
+
 	msg := &DNSMessage{}
 
 	msg.Header.ID = uint16(data[0])<<8 | uint16(data[1])
@@ -204,4 +225,96 @@ func parseDomainName(data []byte, offset int) (string, int, error) {
 	}
 
 	return strings.Join(labels, "."), offset, nil
+}
+
+func createDNSResponse(query *DNSMessage) *DNSMessage {
+	response := &DNSMessage{
+		Header: DNSHeader{
+			ID:      query.Header.ID,
+			Flags:   0x8180, // Standard query response with no error 1000 0001 1000 0000
+			QDCount: query.Header.QDCount,
+			ANCount: 0,
+			NSCount: 0,
+			ARCount: 0,
+		},
+		Questions: query.Questions,
+	}
+
+	for _, question := range query.Questions {
+		if question.Type == TYPE_A && question.Class == CLASS_IN {
+			domainName := strings.ToLower(question.Name)
+			if records, exists := dnsRecords[domainName]; exists {
+				if ipData, hasA := records[TYPE_A]; hasA {
+					answer := DNSResourceRecord{
+						Name:  question.Name,
+						Type:  TYPE_A,
+						Class: CLASS_IN,
+						TTL:   300, // Example TTL of 300 seconds
+						Data:  ipData,
+					}
+					response.Answers = append(response.Answers, answer)
+					response.Header.ANCount++
+				}
+			}
+		}
+	}
+
+	if response.Header.ANCount == 0 {
+		response.Header.Flags |= 0x0003 // Set the "NXDOMAIN" flag // NXDOMAIN（Non-Existent Domain）0000 0000 0000 0011
+	}
+
+	return response
+}
+
+func encodeDNSMessage(msg *DNSMessage) []byte {
+	var buffer []byte
+
+	// Encode the header
+	buffer = append(buffer, byte(msg.Header.ID>>8), byte(msg.Header.ID))
+	buffer = append(buffer, byte(msg.Header.Flags>>8), byte(msg.Header.Flags))
+	buffer = append(buffer, byte(msg.Header.QDCount>>8), byte(msg.Header.QDCount))
+	buffer = append(buffer, byte(msg.Header.ANCount>>8), byte(msg.Header.ANCount))
+	buffer = append(buffer, byte(msg.Header.NSCount>>8), byte(msg.Header.NSCount))
+	buffer = append(buffer, byte(msg.Header.ARCount>>8), byte(msg.Header.ARCount))
+
+	// Encode the questions
+	for _, question := range msg.Questions {
+		nameBytes := encodeDomainName(question.Name)
+		buffer = append(buffer, nameBytes...)
+		buffer = append(buffer, byte(question.Type>>8), byte(question.Type))
+		buffer = append(buffer, byte(question.Class>>8), byte(question.Class))
+	}
+
+	// Encode the answers
+	for _, answer := range msg.Answers {
+		buffer = append(buffer, encodeDomainName(answer.Name)...)
+		buffer = append(buffer, byte(answer.Type>>8), byte(answer.Type))
+		buffer = append(buffer, byte(answer.Class>>8), byte(answer.Class))
+		buffer = append(buffer, byte(answer.TTL>>24), byte(answer.TTL>>16),
+			byte(answer.TTL>>8), byte(answer.TTL))
+		buffer = append(buffer, byte(len(answer.Data)>>8), byte(len(answer.Data)))
+		buffer = append(buffer, answer.Data...)
+	}
+
+	return buffer
+}
+
+func encodeDomainName(name string) []byte {
+	if name == "" {
+		return []byte{0} // Empty domain name
+	}
+
+	var buffer []byte
+	labels := strings.Split(name, ".")
+	for _, label := range labels {
+		if len(label) > 63 {
+			log.Printf("Label too long: %s", label)
+			continue
+		}
+		buffer = append(buffer, byte(len(label)))
+		buffer = append(buffer, []byte(label)...)
+	}
+	buffer = append(buffer, 0) // Null byte to end the domain name
+
+	return buffer
 }
