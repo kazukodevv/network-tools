@@ -37,7 +37,7 @@ The server implements the following DNS data structures:
 ### Running the Server
 
 ```sh
-go run cmd/dns-server/main.go
+go run main.go
 ```
 
 The server will start on port 8053 and display:
@@ -198,5 +198,5 @@ cat log.json | jq 'select(.msg | contains("DNS record found"))'
 cat log.json | jq 'select(.msg | contains("Query handled"))'
 
 cat log.json | jq 'select(.domain == "www.example.com")'
-cat log.json | jq 'select(.question_name == "www.example.com")'
+cat log.json | jq 'select(.question_name == "www.example.com")'v
 ```
