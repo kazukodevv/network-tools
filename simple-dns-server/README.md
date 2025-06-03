@@ -37,7 +37,7 @@ The server implements the following DNS data structures:
 ### Running the Server
 
 ```sh
-go run main.go
+go run cmd/dns-server/main.go
 ```
 
 The server will start on port 8053 and display:
