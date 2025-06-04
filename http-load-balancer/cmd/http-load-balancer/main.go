@@ -14,15 +14,30 @@ type Backend struct {
 	ReverseProxy *httputil.ReverseProxy
 }
 
+func (b *Backend) IsAlive() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Alive
+}
+
+func (b *Backend) SetAlive(alive bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Alive = alive
+}
+
 type LoadBalancer struct {
 	backend []*Backend
 	current uint64
 }
 
+func (lb *LoadBalancer) AddBackend(backend *Backend) {
+	lb.backend = append(lb.backend, backend)
+}
+
 func main() {
 	serverList := []string{
 		"http://localhost:3001",
-		"http://localhost:3002",
 	}
 
 	lb := &LoadBalancer{}
@@ -41,8 +56,7 @@ func main() {
 			ReverseProxy: proxy,
 		}
 
-		lb.backend = append(lb.backend, backend)
+		lb.AddBackend(backend)
 		log.Printf("Added backend server: %s", backend.URL.String())
 	}
-
 }
